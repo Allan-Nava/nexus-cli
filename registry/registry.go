@@ -14,6 +14,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+
+var      Start = time.Now()
+var elapsed = time.Since(Start)
 const ACCEPT_HEADER_V1 = "application/vnd.docker.distribution.manifest.v1+json"
 const ACCEPT_HEADER = "application/vnd.docker.distribution.manifest.v2+json"
 const CREDENTIALS_FILE = ".credentials"
@@ -152,11 +155,22 @@ func (r Registry) ImageManifest(image string, tag string) (ImageManifest, error)
 }
 
 func (r Registry) ImageManifestV1(image string, tag string) (ImageManifestV1, error) {
+    var tr = &http.Transport{
+            MaxIdleConnsPerHost: 90,
+    }
 	var imageManifest ImageManifestV1
-	client := &http.Client{}
-
+	var client = &http.Client{
+            Transport: tr,
+    }
+//elapsed = time.Since(Start)
+//  log.Printf("tag is   %s", tag)
+//  log.Printf("begin get tag %s", elapsed)	
+//   Start = time.Now()
 	url := fmt.Sprintf("%s/repository/%s/v2/%s/manifests/%s", r.Host, r.Repository, image, tag)
 	req, err := http.NewRequest("GET", url, nil)
+	req.Header = http.Header{
+    "Accept": {"application/vnd.docker.distribution.manifest.v2+json"},
+}
 	if err != nil {
 		return imageManifest, err
 	}
@@ -168,7 +182,6 @@ func (r Registry) ImageManifestV1(image string, tag string) (ImageManifestV1, er
 		return imageManifest, err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != 200 {
 		return imageManifest, errors.New(fmt.Sprintf("HTTP Code: %d", resp.StatusCode))
 	}
@@ -177,15 +190,51 @@ func (r Registry) ImageManifestV1(image string, tag string) (ImageManifestV1, er
 	if err != nil {
 		log.Fatalln(err)
 	}
+        resp = nil
 	//json.NewDecoder(resp.Body).Decode(&imageManifest)
-	compatibilityString := gjson.GetBytes(b, `history.0.v1Compatibility`)
-	created := gjson.Get(compatibilityString.String(), `created`)
+	compatibilityString := gjson.GetBytes(b, `config`)
+	b = nil 
+	digest := gjson.Get(compatibilityString.String(), `digest`)
+
+// log.Printf("digest is    %s", digest)
+
+        url = fmt.Sprintf("%s/repository/%s/v2/%s/blobs/%s", r.Host, r.Repository, image, digest)
+        req, err = http.NewRequest("GET", url, nil)
+        req.Header = http.Header{
+    "Accept": {"application/vnd.docker.distribution.manifest.v2+json"},
+}
+        if err != nil {
+                return imageManifest, err
+        }
+        req.SetBasicAuth(r.Username, r.Password)
+        req.Header.Add("Accept", ACCEPT_HEADER_V1)
+
+        resp, err = client.Do(req)
+        if err != nil {
+                return imageManifest, err
+        }
+        defer resp.Body.Close()
+        if resp.StatusCode != 200 {
+                return imageManifest, errors.New(fmt.Sprintf("HTTP Code: %d", resp.StatusCode))
+        }
+        b, err = io.ReadAll(resp.Body)
+        // b, err := ioutil.ReadAll(resp.Body)  Go.1.15 and earlier
+        if err != nil {
+                log.Fatalln(err)
+        }
+        resp = nil
+        //json.NewDecoder(resp.Body).Decode(&imageManifest)
+	created := gjson.Get(string(b),"created")
+        b = nil
+if !created.Exists() {
+                return imageManifest, err
+}
+
+// log.Printf("created  is   %s", created.String())
 	imageManifest.Created = created.String()
 	imageManifest.Date = created.Time()
-	imageManifest.Tag = gjson.GetBytes(b, `tag`).String()
-	imageManifest.Name = gjson.GetBytes(b, `name`).String()
-	imageManifest.Architecture = gjson.GetBytes(b, `architecture`).String()
-	imageManifest.SchemaVersion = gjson.GetBytes(b, `schemaVersion`).Int()
+	imageManifest.Tag = tag
+	imageManifest.Name = image
 	//
 	return imageManifest, nil
 }
